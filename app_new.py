@@ -1,137 +1,119 @@
 import streamlit as st
 import pandas as pd
-import openpyxl
 import plotly.express as px
 import datetime
 
 st.set_page_config(page_title="チーム野球成績管理システム", layout="wide")
 
 st.title("⚾ チーム・個人成績チェックシステム")
-st.write("Excelデータから自動連携された最新の成績を表示しています。")
+st.write("Googleスプレッドシートから自動連携された最新の成績を表示しています。")
 
-# --- 1. データの読み込み関数 ---
+# --- 1. データの読み込み関数（スプレッドシート自動連携） ---
 @st.cache_data(ttl=5)
-def load_excel_data():
-    file = "baseball.xlsx"
-    sheet_out = "統計"
+def load_spreadsheet_data():
+    # あなたのスプレッドシートID
+    sheet_id = "19klE7VorMNWEhSM9zCjYIsiYGxtwY-e6mDC7jGPnmnw"
     
-    wb = openpyxl.load_workbook(file, data_only=True)
-    ws = wb[sheet_out]
+    # ①「現在の成績」シートの読み込み用URL
+    url_main = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=現在の成績"
+    # ②「試合データ」シートの読み込み用URL
+    url_games = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=試合データ"
     
-    yashu_blocks = {}
-    toushu_blocks = {}
+    # CSVとしてPandasで読み込む
+    df_main = pd.read_csv(url_main)
+    df_games = pd.read_csv(url_games)
     
-    curr_month = None
-    curr_start = None
-    
-    # Excelの全行を走査してブロックごとにデータを切り出す
-    for r_idx in range(1, ws.max_row + 1):
-        val = ws.cell(r_idx, 1).value
-        
-        # タイトル行（■ 通算、■ 2026-04 成績 など）を検知
-        if isinstance(val, str) and val.startswith("■"):
-            curr_month = val.replace("■ ", "").replace(" 成績", "").strip()
-            continue
-            
-        # ヘッダー行「番号」を検知
-        if val == "番号":
-            curr_start = r_idx + 1
-            continue
-            
-        # データの終わり（空行、またはシートの最下部）を検知した時の処理
-        if curr_start and (val is None or r_idx == ws.max_row):
-            data_end = r_idx if (r_idx == ws.max_row and val is not None) else r_idx - 1
-            
-            if curr_month and curr_start <= data_end:
-                # --- 野手データの抽出 (A~O列: 1~15番目) ---
-                y_data = []
-                for r in range(curr_start, data_end + 1):
-                    no_val = ws.cell(r, 1).value
-                    if no_val is not None:
-                        r_vals = [ws.cell(r, c).value for c in range(1, 16)]
-                        y_data.append(r_vals)
-                if y_data:
-                    y_cols = ["番号","name","打数","安打","塁打数","四死球","三振","企図","成功","犠飛","打点","打率","長打率","出塁率","OPS"]
-                    yashu_blocks[curr_month] = pd.DataFrame(y_data, columns=y_cols)
-                
-                # --- 投手データの抽出 (U~AF列: 21~32番目) ---
-                p_data = []
-                for r in range(curr_start, data_end + 1):
-                    no_val_p = ws.cell(r, 21).value
-                    if no_val_p is not None:
-                        r_vals = [ws.cell(r, c).value for c in range(21, 33)]
-                        p_data.append(r_vals)
-                if p_data:
-                    p_cols = ["番号","name","投球回","被安打","与四死球","奪三振","自責点","防御率","被打率","与球率","奪三振率","WHIP"]
-                    toushu_blocks[curr_month] = pd.DataFrame(p_data, columns=p_cols)
-                    
-            curr_start = None
-            
-    return yashu_blocks, toushu_blocks
+    return df_main, df_games
 
 try:
-    yashu_months, toushu_months = load_excel_data()
+    df_main, df_games = load_spreadsheet_data()
 except Exception as e:
-    st.error(f"Excelの読み込みに失敗しました。ファイルが閉じられているか確認してください。: {e}")
+    st.error(f"Googleスプレッドシートの読み込みに失敗しました。共有設定やシート名を確認してください。: {e}")
     st.stop()
-
-# 利用可能な「月」のリストを作成（通算は除く）
-months_only = sorted([k for k in yashu_months.keys() if "通算" not in k])
 
 # --- 2. 画面UIの構築 (サイドバーで条件選択) ---
 st.sidebar.header("🔍 表示条件設定")
 
 mode = st.sidebar.radio(
     "表示モードを選択してください：",
-    ["🏆 すべての通算成績", "🗓️ 今月の成績", "🌸 春季リーグ戦（4月・5月）"]
+    ["🏆 すべての通算成績", "🗓️ 今月の成績", "🌸 春季リーグ戦（スコア自動計算）"]
 )
 
 # モードに応じたデータの取得・統合処理
-def get_filtered_data(mode):
+def get_filtered_data(mode, df_main, df_games):
     if mode == "🏆 すべての通算成績":
-        # エクセルの「通算（全試合合計）」または「通算」という名前のブロックを取得
-        k = "通算（全試合合計）" if "通算（全試合合計）" in yashu_months else "通算"
-        return yashu_months.get(k, pd.DataFrame()), toushu_months.get(k, pd.DataFrame())
+        # 「現在の成績」シートをそのまま通算として使用
+        # 投手データが右側にある場合は、列名で分離
+        y_cols = ["番号","name","打数","安打","塁打数","四死球","三振","企図","成功","犠飛","打点","打率","長打率","出塁率","OPS"]
+        p_cols = ["番号_p","name_p","投球回","被安打","与四死球","奪三振","自責点","防御率","被打率","与球率","奪三振率","WHIP"]
+        
+        df_y = df_main[[c for c in y_cols if c in df_main.columns]].dropna(subset=["name"])
+        
+        # 投手データの列（エクセルでいうU列以降）がシートに含まれているか確認
+        p_exist_cols = [c for c in df_main.columns if c in p_cols or c.replace('_p','') in p_cols]
+        if p_exist_cols:
+            df_p = df_main[p_exist_cols].dropna(subset=["name_p" if "name_p" in df_main.columns else "name"])
+            # 列名を綺麗に統一
+            df_p.columns = [c.replace('_p', '') for c in df_p.columns]
+        else:
+            df_p = pd.DataFrame()
+            
+        return df_y, df_p
     
     elif mode == "🗓️ 今月の成績":
-        # 今日の日付から月（2026-05など）を自動取得
-        current_m_str = datetime.datetime.now().strftime("%Y-%m")
-        if current_m_str not in yashu_months and months_only:
-            current_m_str = months_only[-1] # データになければ直近の最新月
-        return yashu_months.get(current_m_str, pd.DataFrame()), toushu_months.get(current_m_str, pd.DataFrame())
+        # 簡易的に通算を表示（必要に応じてメインシートに月別データを分けることも可能）
+        return df_main, pd.DataFrame()
         
-    elif mode == "🌸 春季リーグ戦（4月・5月）":
-        spring_months = [m for m in months_only if m.endswith("-04") or m.endswith("-05")]
-        
-        # 野手4,5月合計
-        y_list = [yashu_months[m] for m in spring_months if m in yashu_months]
-        if y_list:
-            df_s_y = pd.concat(y_list).groupby(["番号", "name"], as_index=False).sum()
-            df_s_y["打率"] = (df_s_y["安打"] / df_s_y["打数"]).fillna(0)
-            df_s_y["長打率"] = (df_s_y["塁打数"] / df_s_y["打数"]).fillna(0)
-            df_s_y["出塁率"] = ((df_s_y["安打"] + df_s_y["四死球"]) / (df_s_y["打数"] + df_s_y["四死球"] + df_s_y["犠飛"])).fillna(0)
-            df_s_y["OPS"] = df_s_y["出塁率"] + df_s_y["長打率"]
-        else: df_s_y = pd.DataFrame()
+    elif mode == "🌸 春季リーグ戦（スコア自動計算）":
+        # 「試合データ」シートから4月・5月のデータを抽出して自動計算
+        if df_games.empty or "試合日" not in df_games.columns:
+            return pd.DataFrame(), pd.DataFrame()
             
-        # 投手4,5月合計
-        p_list = [toushu_months[m] for m in spring_months if m in toushu_months]
-        if p_list:
-            df_s_p = pd.concat(p_list).groupby(["番号", "name"], as_index=False).sum()
+        # 試合日を日付型に変換して4月・5月を抽出
+        df_games["試合日"] = pd.to_datetime(df_games["試合日"])
+        df_spring = df_games[df_games["試合日"].dt.month.isin([4, 5])]
+        
+        if df_spring.empty:
+            return pd.DataFrame(), pd.DataFrame()
+            
+        # 野手成績の自動計算
+        df_s_y = df_spring.groupby(["選手名"], as_index=False).sum()
+        df_s_y = df_s_y.rename(columns={"選手名": "name"})
+        df_s_y["番号"] = range(1, len(df_s_y) + 1) # 簡易的な背番号
+        
+        # 野手能力の自動計算数式
+        df_s_y["打率"] = (df_s_y["安打"] / df_s_y["打数"]).fillna(0)
+        # 塁打数の計算（単打+二塁打*2+三塁打*3+本塁打*4）※シートに内訳があれば自動計算
+        if "単打" in df_s_y.columns:
+            df_s_y["塁打数"] = df_s_y["単打"] + df_s_y["二塁打"]*2 + df_s_y["三塁打"]*3 + df_s_y["本塁打"]*4
+        else:
+            df_s_y["塁打数"] = df_s_y["安打"] # 内訳がなければ一律安打数
+            
+        df_s_y["長打率"] = (df_s_y["塁打数"] / df_s_y["打数"]).fillna(0)
+        df_s_y["出塁率"] = ((df_s_y["安打"] + df_s_y["四死球"]) / (df_s_y["打数"] + df_s_y["四死球"] + df_s_y["犠飛"])).fillna(0)
+        df_s_y["OPS"] = df_s_y["出塁率"] + df_s_y["長打率"]
+        
+        # 投手成績の自動計算（試合データに投手項目がある場合）
+        if "投球回" in df_spring.columns:
+            df_s_p = df_spring.groupby(["選手名"], as_index=False).sum()
+            df_s_p = df_s_p.rename(columns={"選手名": "name"})
+            df_s_p["番号"] = range(1, len(df_s_p) + 1)
             df_s_p["防御率"] = ((df_s_p["自責点"] * 9) / df_s_p["投球回"]).fillna(0)
             df_s_p["WHIP"] = ((df_s_p["被安打"] + df_s_p["与四死球"]) / df_s_p["投球回"]).fillna(0)
-            df_s_p["被打率"] = (df_s_p["被安打"] / df_s_p["投球回"]).fillna(0)
+            df_s_p["被打率"] = (df_s_p["被安打"] / df_s_p["投球回"]).fillna(0) # 簡易計算
             df_s_p["与球率"] = ((df_s_p["与四死球"] * 9) / df_s_p["投球回"]).fillna(0)
             df_s_p["奪三振率"] = ((df_s_p["奪三振"] * 9) / df_s_p["投球回"]).fillna(0)
-        else: df_s_p = pd.DataFrame()
+        else:
+            df_s_p = pd.DataFrame()
             
         return df_s_y, df_s_p
 
-df_active_y, df_active_p = get_filtered_data(mode)
+df_active_y, df_active_p = get_filtered_data(mode, df_main, df_games)
 
-# 選手・対象リストの作成（チーム全体を先頭にする）
+# 選手・対象リストの作成
 all_players = set()
-if not df_active_y.empty: all_players.update(df_active_y["name"].tolist())
-if not df_active_p.empty: all_players.update(df_active_p["name"].tolist())
+if not df_active_y.empty and "name" in df_active_y.columns: all_players.update(df_active_y["name"].tolist())
+if not df_active_p.empty and "name" in df_active_p.columns: all_players.update(df_active_p["name"].tolist())
 all_players = sorted(list(all_players))
 
 selected_target = st.sidebar.selectbox(
@@ -143,36 +125,38 @@ selected_target = st.sidebar.selectbox(
 st.header(f"{mode} ── 表示中: {selected_target}")
 
 if selected_target == "👥 チーム全体":
-    # === ① チーム全体の成績を一気に見る画面 ===
     col1, col2 = st.columns(2)
     
     with col1:
         st.subheader("🔹 野手成績（ランキング順）")
         if not df_active_y.empty:
             df_show_y = df_active_y.sort_values(by="OPS", ascending=False)
+            # 必要な列だけを安全に抽出
+            show_cols = [c for c in ["番号","name","打数","安打","打点","打率","長打率","出塁率","OPS"] if c in df_show_y.columns]
             st.dataframe(
-                df_show_y.style.background_gradient(cmap="YlGn", subset=["打率", "長打率", "出塁率", "OPS"])
-                              .format({c: "{:.3f}" for c in ["打率", "長打率", "出塁率", "OPS"]}), 
+                df_show_y[show_cols].style.background_gradient(cmap="YlGn", subset=[c for c in ["打率", "長打率", "出塁率", "OPS"] if c in show_cols])
+                                      .format({c: "{:.3f}" for c in ["打率", "長打率", "出塁率", "OPS"] if c in show_cols}), 
                 height=600, use_container_width=True
             )
         else:
-            st.info("対象の野手データがありません。")
+            st.info("対象の野手データがありません。シート名やスコアの入力内容を確認してください。")
             
     with col2:
         st.subheader("🔸 投手成績（防御率順）")
         if not df_active_p.empty:
             df_show_p = df_active_p.sort_values(by="防御率", ascending=True)
+            show_cols_p = [c for c in ["番号","name","投球回","防御率","WHIP","被打率","与球率","奪三振率"] if c in df_show_p.columns]
             st.dataframe(
-                df_show_p.style.background_gradient(cmap="OrRd_r", subset=["防御率", "WHIP"])
-                              .format({c: "{:.2f}" for c in ["防御率", "WHIP", "与球率", "奪三振率"]})
-                              .format({"被打率": "{:.3f}"}), 
+                df_show_p[show_cols_p].style.background_gradient(cmap="OrRd_r", subset=[c for c in ["防御率", "WHIP"] if c in show_cols_p])
+                                      .format({c: "{:.2f}" for c in ["防御率", "WHIP", "与球率", "奪三振率"] if c in show_cols_p})
+                                      .format({"被打率": "{:.3f}" if "被打率" in show_cols_p else "{}"}), 
                 height=600, use_container_width=True
             )
         else:
             st.info("対象の投手データがありません。")
 
 else:
-    # === ② 個人成績 ＋ レーダーチャート画面 ===
+    # === 個人成績 ＋ レーダーチャート画面 ===
     p_y = df_active_y[df_active_y["name"] == selected_target] if not df_active_y.empty else pd.DataFrame()
     p_p = df_active_p[df_active_p["name"] == selected_target] if not df_active_p.empty else pd.DataFrame()
     
@@ -184,40 +168,37 @@ else:
         with col_data:
             if not p_y.empty:
                 st.subheader("⚾ 野手個人スタッツ")
-                st.dataframe(p_y.style.format({c: "{:.3f}" for c in ["打率", "長打率", "出塁率", "OPS"]}), use_container_width=True)
+                st.dataframe(p_y.style.format({c: "{:.3f}" for c in ["打率", "長打率", "出塁率", "OPS"] if c in p_y.columns}), use_container_width=True)
                 
             if not p_p.empty:
                 st.subheader("🥎 投手個人スタッツ")
-                st.dataframe(p_p.style.format({c: "{:.2f}" for c in ["防御率", "WHIP", "与球率", "奪三振率"]}).format({"被打率": "{:.3f}"}), use_container_width=True)
+                st.dataframe(p_p.style.format({c: "{:.2f}" for c in ["防御率", "WHIP", "与球率", "奪三振率"] if c in p_p.columns}).format({"被打率": "{:.3f}" if "被打率" in p_p.columns else "{}"}), use_container_width=True)
                 
         with col_graph:
             st.subheader("📊 選手能力レーダーチャート")
             
-            # --- 野手のレーダーチャート描画 ---
             if not p_y.empty:
                 row = p_y.iloc[0]
                 stats = {
-                    "打率(ミート)": min(row["打率"] / 0.400, 1.0),
-                    "長打率(パワー)": min(row["長打率"] / 0.600, 1.0),
-                    "出塁率(選球眼)": min(row["出塁率"] / 0.450, 1.0),
-                    "OPS(貢献度)": min(row["OPS"] / 1.000, 1.0),
-                    "打点(勝負強さ)": min(row["打点"] / 15, 1.0)
+                    "打率(ミート)": min(row.get("打率", 0) / 0.400, 1.0),
+                    "長打率(パワー)": min(row.get("長打率", 0) / 0.600, 1.0),
+                    "出塁率(選球眼)": min(row.get("出塁率", 0) / 0.450, 1.0),
+                    "OPS(貢献度)": min(row.get("OPS", 0) / 1.000, 1.0),
+                    "打点(勝負強さ)": min(row.get("打点", 0) / 15, 1.0)
                 }
-                
                 df_graph = pd.DataFrame(dict(r=list(stats.values()), theta=list(stats.keys())))
                 fig = px.line_polar(df_graph, r='r', theta='theta', line_close=True, range_r=[0,1])
                 fig.update_traces(fill='toself', line_color="#2E7D32")
                 fig.update_layout(polar=dict(radialaxis=dict(visible=True, showticklabels=False)), margin=dict(l=40, r=40, t=40, b=40))
                 st.plotly_chart(fig, use_container_width=True)
                 
-            # --- 投手のレーダーチャート描画 ---
             elif not p_p.empty:
                 row = p_p.iloc[0]
                 stats_p = {
-                    "防御率(安定感)": max(0.0, min(1.0, (6.0 - row["防御率"]) / 6.0)),
-                    "WHIP(支配力)": max(0.0, min(1.0, (2.0 - row["WHIP"]) / 2.0)),
-                    "与球率(制球力)": max(0.0, min(1.0, (5.0 - row["与球率"]) / 5.0)),
-                    "奪三振率(キレ)": min(row["奪三振率"] / 10.0, 1.0)
+                    "防御率(安定感)": max(0.0, min(1.0, (6.0 - row.get("防御率", 0)) / 6.0)),
+                    "WHIP(支配力)": max(0.0, min(1.0, (2.0 - row.get("WHIP", 0)) / 2.0)),
+                    "与球率(制球力)": max(0.0, min(1.0, (5.0 - row.get("与球率", 0)) / 5.0)),
+                    "奪三振率(キレ)": min(row.get("奪三振率", 0) / 10.0, 1.0)
                 }
                 df_graph = pd.DataFrame(dict(r=list(stats_p.values()), theta=list(stats_p.keys())))
                 fig = px.line_polar(df_graph, r='r', theta='theta', line_close=True, range_r=[0,1])
