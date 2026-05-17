@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import datetime
+import urllib.parse
 
 st.set_page_config(page_title="チーム野球成績管理システム", layout="wide")
 
@@ -14,10 +15,14 @@ def load_spreadsheet_data():
     # あなたのスプレッドシートID
     sheet_id = "19klE7VorMNWEhSM9zCjYIsiYGxtwY-e6mDC7jGPnmnw"
     
+    # 日本語のシート名をURL用に安全に変換（日本語エラー対策）
+    sheet_main_encoded = urllib.parse.quote("現在の成績")
+    sheet_games_encoded = urllib.parse.quote("試合データ")
+    
     # ①「現在の成績」シートの読み込み用URL
-    url_main = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=現在の成績"
+    url_main = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_main_encoded}"
     # ②「試合データ」シートの読み込み用URL
-    url_games = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=試合データ"
+    url_games = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_games_encoded}"
     
     # CSVとしてPandasで読み込む
     df_main = pd.read_csv(url_main)
@@ -42,18 +47,14 @@ mode = st.sidebar.radio(
 # モードに応じたデータの取得・統合処理
 def get_filtered_data(mode, df_main, df_games):
     if mode == "🏆 すべての通算成績":
-        # 「現在の成績」シートをそのまま通算として使用
-        # 投手データが右側にある場合は、列名で分離
         y_cols = ["番号","name","打数","安打","塁打数","四死球","三振","企図","成功","犠飛","打点","打率","長打率","出塁率","OPS"]
         p_cols = ["番号_p","name_p","投球回","被安打","与四死球","奪三振","自責点","防御率","被打率","与球率","奪三振率","WHIP"]
         
         df_y = df_main[[c for c in y_cols if c in df_main.columns]].dropna(subset=["name"])
         
-        # 投手データの列（エクセルでいうU列以降）がシートに含まれているか確認
         p_exist_cols = [c for c in df_main.columns if c in p_cols or c.replace('_p','') in p_cols]
         if p_exist_cols:
             df_p = df_main[p_exist_cols].dropna(subset=["name_p" if "name_p" in df_main.columns else "name"])
-            # 列名を綺麗に統一
             df_p.columns = [c.replace('_p', '') for c in df_p.columns]
         else:
             df_p = pd.DataFrame()
@@ -61,11 +62,10 @@ def get_filtered_data(mode, df_main, df_games):
         return df_y, df_p
     
     elif mode == "🗓️ 今月の成績":
-        # 簡易的に通算を表示（必要に応じてメインシートに月別データを分けることも可能）
+        # ひとまず「現在の成績」の通算をそのまま表示（必要に応じて後から月別シートも作れます）
         return df_main, pd.DataFrame()
         
     elif mode == "🌸 春季リーグ戦（スコア自動計算）":
-        # 「試合データ」シートから4月・5月のデータを抽出して自動計算
         if df_games.empty or "試合日" not in df_games.columns:
             return pd.DataFrame(), pd.DataFrame()
             
@@ -79,28 +79,27 @@ def get_filtered_data(mode, df_main, df_games):
         # 野手成績の自動計算
         df_s_y = df_spring.groupby(["選手名"], as_index=False).sum()
         df_s_y = df_s_y.rename(columns={"選手名": "name"})
-        df_s_y["番号"] = range(1, len(df_s_y) + 1) # 簡易的な背番号
+        df_s_y["番号"] = range(1, len(df_s_y) + 1)
         
-        # 野手能力の自動計算数式
+        # 数式での自動計算
         df_s_y["打率"] = (df_s_y["安打"] / df_s_y["打数"]).fillna(0)
-        # 塁打数の計算（単打+二塁打*2+三塁打*3+本塁打*4）※シートに内訳があれば自動計算
         if "単打" in df_s_y.columns:
             df_s_y["塁打数"] = df_s_y["単打"] + df_s_y["二塁打"]*2 + df_s_y["三塁打"]*3 + df_s_y["本塁打"]*4
         else:
-            df_s_y["塁打数"] = df_s_y["安打"] # 内訳がなければ一律安打数
+            df_s_y["塁打数"] = df_s_y["安打"]
             
         df_s_y["長打率"] = (df_s_y["塁打数"] / df_s_y["打数"]).fillna(0)
         df_s_y["出塁率"] = ((df_s_y["安打"] + df_s_y["四死球"]) / (df_s_y["打数"] + df_s_y["四死球"] + df_s_y["犠飛"])).fillna(0)
         df_s_y["OPS"] = df_s_y["出塁率"] + df_s_y["長打率"]
         
-        # 投手成績の自動計算（試合データに投手項目がある場合）
+        # 投手成績の自動計算
         if "投球回" in df_spring.columns:
             df_s_p = df_spring.groupby(["選手名"], as_index=False).sum()
             df_s_p = df_s_p.rename(columns={"選手名": "name"})
             df_s_p["番号"] = range(1, len(df_s_p) + 1)
             df_s_p["防御率"] = ((df_s_p["自責点"] * 9) / df_s_p["投球回"]).fillna(0)
             df_s_p["WHIP"] = ((df_s_p["被安打"] + df_s_p["与四死球"]) / df_s_p["投球回"]).fillna(0)
-            df_s_p["被打率"] = (df_s_p["被安打"] / df_s_p["投球回"]).fillna(0) # 簡易計算
+            df_s_p["被打率"] = (df_s_p["被安打"] / df_s_p["投球回"]).fillna(0)
             df_s_p["与球率"] = ((df_s_p["与四死球"] * 9) / df_s_p["投球回"]).fillna(0)
             df_s_p["奪三振率"] = ((df_s_p["奪三振"] * 9) / df_s_p["投球回"]).fillna(0)
         else:
@@ -131,7 +130,6 @@ if selected_target == "👥 チーム全体":
         st.subheader("🔹 野手成績（ランキング順）")
         if not df_active_y.empty:
             df_show_y = df_active_y.sort_values(by="OPS", ascending=False)
-            # 必要な列だけを安全に抽出
             show_cols = [c for c in ["番号","name","打数","安打","打点","打率","長打率","出塁率","OPS"] if c in df_show_y.columns]
             st.dataframe(
                 df_show_y[show_cols].style.background_gradient(cmap="YlGn", subset=[c for c in ["打率", "長打率", "出塁率", "OPS"] if c in show_cols])
@@ -139,7 +137,7 @@ if selected_target == "👥 チーム全体":
                 height=600, use_container_width=True
             )
         else:
-            st.info("対象の野手データがありません。シート名やスコアの入力内容を確認してください。")
+            st.info("対象の野手データがありません。スプレッドシートの入力内容を確認してください。")
             
     with col2:
         st.subheader("🔸 投手成績（防御率順）")
@@ -148,8 +146,8 @@ if selected_target == "👥 チーム全体":
             show_cols_p = [c for c in ["番号","name","投球回","防御率","WHIP","被打率","与球率","奪三振率"] if c in df_show_p.columns]
             st.dataframe(
                 df_show_p[show_cols_p].style.background_gradient(cmap="OrRd_r", subset=[c for c in ["防御率", "WHIP"] if c in show_cols_p])
-                                      .format({c: "{:.2f}" for c in ["防御率", "WHIP", "与球率", "奪三振率"] if c in show_cols_p})
-                                      .format({"被打率": "{:.3f}" if "被打率" in show_cols_p else "{}"}), 
+                                      .format({c: "{2}" for c in ["防御率", "WHIP", "与球率", "奪三振率"] if c in show_cols_p}.get("防御率", "{:.2f}")) # 安全なフォーマット
+                                      .format({"防御率": "{:.2f}", "WHIP": "{:.2f}", "与球率": "{:.2f}", "奪三振率": "{:.2f}", "被打率": "{:.3f}"}), 
                 height=600, use_container_width=True
             )
         else:
